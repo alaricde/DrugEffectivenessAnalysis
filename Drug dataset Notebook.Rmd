@@ -1,0 +1,882 @@
+---
+title: "Drug dataset Notebook"
+date: "20/09/2023"
+author: "Alaric de Biolley"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+# 0. Introduction
+
+This project will study the Drug_Dataset.csv file, a compilation of 685 observations on 10 different variables related to drug attributes and patient ratings. The aim of this exploration and analysis in this dataset is to investigate whether the ease of use of a drug can predict its effectiveness and to identify common active compounds in less predictable drugs.
+
+Here is the link where the data comes from: <https://www.kaggle.com/datasets/thedevastator/drug-performance-evaluation>
+
+# 1. **Import Necessary Libraries**
+
+```{r}
+library(tidyverse)     # Comprehensive data manipulation & visualization
+library(reshape2)      # Data reshaping tools
+library(doParallel)    # Parallel computation tools
+library(ggfortify)     # Data visualization enhancements for statistical analysis
+library(caret)         # Data partitioning and predictive model training
+library(Metrics)       # Model performance metrics, e.g., RMSE
+library(FactoMineR)    # Principal Component Analysis and related methods
+library(factoextra)    # Visualization and extraction of PCA and clustering results
+library(randomForest)  # Random Forest modeling
+library(kernlab)       # Kernel-based machine learning methods
+library(gbm)           # Generalized Boosted Regression Models
+library(xgboost)       # Optimized gradient boosting framework
+library(caTools)       # Tools for data splitting and moving window statistics
+library(e1071)         # SVM and other machine learning tools
+```
+
+# 2. **Setup Working Directory, Data Importation and Classifications**
+
+```{r}
+# Setting the working directory, Replace this path to your computer
+setwd("/Users/alaric/Desktop/P1/Scientific Programming (MSB1015)")
+
+# Read the data
+drug_data <- read.csv("Drug_Dataset.csv", stringsAsFactors = FALSE)
+
+# Get an initial look at the data structure
+str(drug_data)
+
+# Classify variables into numeric and categorical
+numeric_vars <- names(drug_data)[sapply(drug_data, is.numeric)]
+categorical_vars <- setdiff(names(drug_data), numeric_vars)
+
+# Classify numeric variables into bounded and unbounded
+numeric_unbounded_vars <- c("Price", "Reviews")
+numeric_bounded_vars <- setdiff(numeric_vars, numeric_unbounded_vars)
+```
+
+The code sets up a specific working directory and imports "Drug_Dataset.csv". The directory defined corresponds to the local access path, which users must modify according to their configuration. On loading, the code provides an overview of the structure of the dataset. It then classifies the variables into two main categories: 'numeric' (representing numbers) and 'categorical' (textual descriptions of categories). In the 'numeric' category, variables are then classified as 'delimited' (with values between 1 and 5) or 'undefined' (which can take on very high values). For example, the "Price" and "Criticism" variables are designated as "unbounded" in order to facilitate the data processing stages in later phases.
+
+# 3. Data Quality Checks: Missing, Duplicate, and Negative Values
+
+```{r}
+# Check for missing values across all columns
+miss_vals <- sapply(drug_data, function(x) sum(is.na(x)))
+cat("\nChecking for missing values in each column:\n")
+miss_vals <- miss_vals[miss_vals > 0] # Only retain columns with missing values
+if(length(miss_vals) > 0) {
+    print(miss_vals)
+} else {
+    cat("No missing values found in the dataset.\n")
+}
+
+# Check for duplicate observations
+duplicates <- drug_data[duplicated(drug_data), ]
+cat("\nChecking for duplicate rows in the dataset:\n")
+if(nrow(duplicates) > 0) {
+    cat("Number of duplicate rows:", nrow(duplicates), "\n")
+    print(head(duplicates)) # Display first few rows to prevent console overflow
+} else {
+    cat("No duplicate rows found in the dataset.\n")
+}
+
+# Verify if there are any negative values in the numeric columns
+negative_vals <- sapply(drug_data[numeric_vars], function(x) sum(x < 0))
+cat("\nChecking for negative values in numeric columns:\n")
+negative_vals <- negative_vals[negative_vals > 0] # Only retain columns with negative values
+if (length(negative_vals) > 0) {
+    print(negative_vals)
+} else {
+    cat("No negative values found in the numeric columns.\n")
+}
+```
+
+The dataset is evaluated for missing values, duplicate rows and negative entries in numeric columns. Specific columns with missing or negative values are highlighted, while the number and a sample of duplicate rows are presented. If no problems are detected during each check, a confirmation of the absence of problems is provided.
+
+# **4. Inspection, Outliers Detection, Data Cleaning and Scaling**
+
+## 4.1. Inspection of numeric and categorical variables
+
+```{r}
+# View the initial data
+head(drug_data)
+
+# Summarize the dataset
+summary(drug_data)
+
+# Function to visualize numeric variables
+visualize_numeric <- function(df, vars) {
+  par(mfrow = c(2, ceiling(length(vars)/2)))
+  for(var in vars) {
+    # Boxplot visualization
+    boxplot(df[[var]], main = paste(var, "- Boxplot"), col = "lightblue", border = "black")
+    # Histogram visualization
+    hist(df[[var]], main = paste(var, "- Histogram"), col = "lightblue", border = "black",
+         breaks = 30)
+  }
+}
+
+# Display numeric variable visualizations
+visualize_numeric(drug_data, numeric_vars)
+
+# Function to visualize categorical variables
+visualize_categorical <- function(df, vars) {
+  par(mfrow = c(2, ceiling(length(vars)/2)))
+  for(var in vars) {
+    # Frequency barplot
+    freq <- table(df[[var]])
+    barplot(freq, main = paste(var, "- Frequency"), col = "lightcoral", border = "black", 
+            las= 2)
+  }
+}
+
+# Exclude certain variables for standard visualization
+exclude_vars <- c("Drug", "Condition")
+filtered_categorical_vars <- setdiff(categorical_vars, exclude_vars)
+# Display categorical variable visualizations (excluding special cases)
+visualize_categorical(drug_data, filtered_categorical_vars)
+
+# Function to plot top N frequencies
+plot_top_n <- function(data, var_name, N=10, col="lightcoral") {
+  freq <- sort(table(data), decreasing = TRUE)[1:N]
+  # Display top N frequencies
+  barplot(freq, main = paste("Top", N, var_name, "Frequencies"), col = col, 
+          border = "black", las = 2)
+}
+
+par(mfrow = c(1, 2))
+# Display top 10 drugs and conditions
+plot_top_n(drug_data$Drug, "Drug")  
+plot_top_n(drug_data$Condition, "Condition")
+```
+
+The drug dataset undergoes a preliminary review. First, the first few rows of the dataset are displayed, followed by a summary to give an overview. For numerical variables, box plots and histograms are produced to visualise data distribution, dispersion and potential outliers. At the same time, categorical variables are visualised using frequency diagrams to show the number of each category. To avoid overloading the graphs with numerous unique values, only the 10 highest frequencies for the 'Drug' and 'Condition' variables are shown. This structured approach provides a comprehensive overview of the numerical and categorical facets of the dataset.
+
+## 4.2. Data cleaning: outliers detection and scaling
+
+```{r}
+# --- Data Cleaning ---
+
+# Initialization
+drug_data_clean <- drug_data
+
+# Outlier Handling using IQR method
+handle_outliers <- function(df, vars) {
+    for(var in vars) {
+        Q1 <- quantile(df[[var]], 0.25, na.rm = TRUE)
+        Q3 <- quantile(df[[var]], 0.75, na.rm = TRUE)
+        IQR <- Q3 - Q1
+
+        lower_bound <- Q1 - (1.5 * IQR)
+        upper_bound <- Q3 + (1.5 * IQR)
+
+        to_remove <- which(df[[var]] < lower_bound | df[[var]] > upper_bound)
+
+        if((nrow(df) - length(to_remove)) >= 400) {
+            df <- df[-to_remove,]
+            # Log transformation, applied to reduce skewness
+            if(min(df[[var]], na.rm = TRUE) > 0) {
+                df[[var]] <- log(df[[var]])
+            }
+        }
+    }
+    return(df)
+}
+
+drug_data_clean <- handle_outliers(drug_data_clean, numeric_unbounded_vars)
+
+# Visualization of Cleaned Data
+visualize_cleaned_data <- function(df, vars) {
+    par(mfrow = c(1,2))
+    for(var in vars) {
+        boxplot(df[[var]], main = paste(var, " - Cleaned"), col = "lightgreen", 
+                border = "black")
+    }
+}
+
+visualize_cleaned_data(drug_data_clean, numeric_unbounded_vars)
+
+# Overview of Cleaned Data
+cat("\nSummary of Cleaned Data:\n")
+summary(drug_data_clean)
+
+# --- Data Scaling ---
+
+# Initialization
+drug_data_scaled <- drug_data_clean
+
+# Min-Max Scaling
+scale_data <- function(df, vars) {
+    for(var in vars) {
+        min_val <- min(df[[var]], na.rm = TRUE)
+        max_val <- max(df[[var]], na.rm = TRUE)
+        df[[var]] <- 1 + ((df[[var]] - min_val) * 4) / (max_val - min_val)
+    }
+    return(df)
+}
+
+drug_data_scaled <- scale_data(drug_data_scaled, numeric_unbounded_vars)
+
+# Visualization of Scaled Data
+visualize_scaled_data <- function(df, vars) {
+    par(mfrow = c(2,2))
+    for(var in vars) {
+        boxplot(df[[var]], main = paste(var, "- Scaled Boxplot"), 
+                col = "lightblue", border = "black")
+        hist(df[[var]], main = paste(var, "- Scaled Histogram"), 
+             col = "lightblue", border = "black", breaks = 30)
+    }
+}
+
+visualize_scaled_data(drug_data_scaled, numeric_unbounded_vars)
+
+# Overview of Scaled Data
+cat("\nSummary of Scaled Data:\n")
+summary(drug_data_scaled)
+```
+
+Outliers are identified using the IQR method, with a threshold set at 1.5 times the IQR. After cleaning, a minimum of 400 data points remain to ensure there is enough data for further analysis. Next, the variables are logarithmically transformed to reduce the influence of extreme values. Finally, the data is scaled linearly in the interval [1, 5] using the Min-Max scale. This standardisation produces a consistent analysis format, similar to a ranking.
+
+# 5. Heatmap of Numeric Variables and Correlation Analysis
+
+```{r}
+# --- Heatmap of Numeric Variables and Correlation Analysis ---
+
+# Compute the correlation matrix for numeric variables
+cor_matrix <- cor(drug_data_clean[, numeric_vars], use = "pairwise.complete.obs")
+
+# Melt the correlation matrix for visualization
+melted_cor_matrix <- melt(cor_matrix)
+
+# Filter out self-correlations (diagonal)
+filtered_cor_matrix <- subset(melted_cor_matrix, Var1 != Var2)
+
+# Create a unique pair ID to handle pairs like (Var1, Var2) and (Var2, Var1) as identical
+filtered_cor_matrix$pair_id <- apply(filtered_cor_matrix[, c("Var1", "Var2")], 1,
+                                     function(row) {
+  paste(sort(row), collapse = "_")
+})
+
+# Remove duplicates based on the unique pair ID and then sort by absolute correlation
+unique_pairs <- filtered_cor_matrix[!duplicated(filtered_cor_matrix$pair_id), ]
+sorted_cor_matrix <- unique_pairs[order(-abs(unique_pairs$value)), ]
+
+# Generate the heatmap using ggplot2 and the Pearson correlation 
+heatmap_plot <- ggplot(data = melted_cor_matrix, aes(x = Var1, y = Var2)) +
+  geom_tile(aes(fill = value), color = "white") +
+  geom_text(aes(label = sprintf("%.2f", value)), vjust = 1) +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1),
+        axis.text.y = element_text(size = 12)) +
+  coord_fixed()
+
+# Display the heatmap
+print(heatmap_plot)
+
+# Extract and print the top 3 unique correlated pairs
+top_3_pairs <- head(sorted_cor_matrix, 3)
+cat("Top 3 Correlated Pairs:\n")
+print(top_3_pairs[, c("Var1", "Var2", "value")])
+
+# Scatter Plots for Top 3 Pairs
+plot_scatter <- function(data, var1, var2) {
+  ggplot(data, aes_string(x = var1, y = var2)) + 
+    geom_point(alpha = 0.5, color = "blue") +
+    theme_minimal() +
+    labs(title = paste("Scatter plot of", var1, "vs", var2),
+         x = var1, 
+         y = var2)
+}
+
+# Display scatter plots for only the top 3 pairs
+for (i in 1:nrow(top_3_pairs)) {
+  var1 <- as.character(top_3_pairs$Var1[i])
+  var2 <- as.character(top_3_pairs$Var2[i])
+  print(plot_scatter(drug_data_clean, var1, var2))
+}
+
+# --- Regression Analysis ---
+
+# Fit regression models for the top 3 correlated pairs and store the results
+regression_results <- lapply(1:nrow(top_3_pairs), function(i) {
+  var1 <- as.character(top_3_pairs$Var1[i])
+  var2 <- as.character(top_3_pairs$Var2[i])
+  
+  # Fit the linear regression model
+  model <- lm(as.formula(paste(var2, "~", var1)), data = drug_data_clean)
+  
+  # Return the summary of the model
+  return(summary(model))
+})
+
+# Display the regression results
+cat("Regression Analysis Results:\n")
+lapply(regression_results, print)
+```
+
+In this segment of the script, the aim is to unravel the relationships among numeric variables within the drug dataset.
+
+**Methodology**:
+
+-   **Heatmap and Correlation Analysis**: Through Pearson Correlation, a matrix is formed for all numeric variables, with the results displayed in a heatmap. This visualization reflects the linear connections between variables, using a color gradient from blue (negative correlation) to red (positive correlation).
+
+-   **Top Correlated Pairs Exploration**: The matrix is set to highlight the most distinct correlations. Scatter plots could further elucidate these relationships.
+
+-   **Regression Analysis**: Linear regression models are suggested for highly correlated pairs, providing coefficients, R-squared values, and other pertinent statistics.
+
+**Observations from the Heatmap**:
+
+1.  **Strong Positive Correlations**:
+
+    -   **Satisfaction and Effective**: The correlation value of 0.86 indicates a very strong positive relationship
+
+    -   **EaseOfUse and Satisfaction**: A correlation of 1.00 denotes a perfect positive relationship
+
+    -   **EaseOfUse and Effective**: With a correlation of 0.66, this suggests a strong positive relationship
+
+2.  **Moderate Positive Correlation**:
+
+    -   **Price and Reviews**: A correlation value of 0.33 suggests a moderate positive relationship.
+
+3.  **Weak or Negligible Correlations**:
+
+    -   Relationships like **Reviews and Effective** (0.05) or **Price and Effective** (-0.01) are weak or negligible.
+
+4.  **Weak Negative Correlations**:
+
+    -   **Price and Satisfaction**: A value of -0.09 indicates a slight negative relationship.
+
+    -   **Effective and Reviews**: A correlation of -0.06 suggests a very weak negative relationship.
+
+**Findings**:
+
+The heatmap shines a light on the linear ties among variables. Notably:
+
+-   A significant positive correlation exists between "Satisfaction" and "Effective", suggesting drugs perceived as effective also have high satisfaction scores.
+
+-   "EaseOfUse" and "Effective" correlate positively, inferring that effective drugs are also user-friendly.
+
+-   "Price" and "Reviews" display subdued correlations, indicating weak linear relationships.
+
+Regression model exhibit:
+
+-   A strong bond between "Satisfaction" and "Effective", where a unit increase in "Satisfaction" relates to a rise in the dependent variable.
+
+-   "Effective" predicting "EaseOfUse" might reveal a strong positive relationship.
+
+-   A model with "Satisfaction" predicting "EaseOfUse" could show that an increase in "Satisfaction" leads to a climb in the dependent variable.
+
+**Conclusion**:
+
+Overall, the data suggests that for the analyzed drugs, perceived effectiveness and subsequent user satisfaction play key roles in influencing other variables or outcomes.
+
+# **6. Principal Component Analysis (PCA) and Biplot**
+
+```{r}
+# ------- Initialization and Data Extraction -------
+
+# Perform PCA on the scaled data
+pca_result <- PCA(drug_data_scaled[, numeric_vars], graph = FALSE)
+
+# Define gradient colors
+gradient_colors <- c("#00AFBB", "#E7B800", "#FC4E07")
+
+# Extract loadings, contributions, and cos2 values
+loadings_matrix <- pca_result$var$coord
+contributions <- pca_result$var$contrib
+cos2_vars <- pca_result$var$cos2
+
+
+# ------- Functions -------
+
+# Function to generate PCA individual plots with consistent settings
+plot_pca <- function(pca, axes, title_text) {
+  return(
+    fviz_pca_ind(pca, 
+                 axes = axes, 
+                 geom = "point", 
+                 repel = TRUE, 
+                 title = title_text) + 
+      theme_minimal()
+  )
+}
+
+
+# ------- Visualizations -------
+
+# Visualizing the eigenvalues/variances
+fviz_eig(pca_result, addlabels = TRUE)
+
+# Individual plots for PCs
+lapply(list(c(1, 2), c(2, 3), c(1, 3)), function(axes) {
+  plot_pca(pca_result, axes, paste0("PC", axes[1], " vs PC", axes[2]))
+})
+
+# Biplot with variables and individuals
+fviz_pca_biplot(pca_result, 
+                geom = c("point"),
+                col.var = "#FC4E07",
+                gradient.cols = gradient_colors,
+                arrow.size = 0.5,
+                labelsize = 3,
+                repel = TRUE, 
+                title = "PCA Biplot") + 
+  theme_minimal()
+
+# Display loadings to check contributions of original variables
+print(loadings_matrix)
+
+# Visualize contributions to the first two PCs
+lapply(1:2, function(axis) {
+  fviz_contrib(pca_result, choice = "var", axes = axis, top = 10)
+})
+
+# Quality of representation on PCs (cos2 values)
+fviz_cos2(pca_result, choice = "var", axes = 1:2)
+
+# Correlation Circle Plot showing correlations of original variables with PCs
+fviz_pca_var(pca_result, col.var="contrib", gradient.cols = gradient_colors, repel = TRUE)
+```
+
+### **Methodology:**
+
+The script uses Principal Component Analysis (PCA) to explore the drug dataset. The visualization palette is defined, followed by the execution of the PCA on the scaled dataset. Separate graphs then show the relationships between the principal components. A biplot then provides an overview, illustrating the positioning of data points and variables in the PCA space. For a nuanced understanding of the importance of variables to the principal components, loadings and their contributions are displayed. The cosine squared values elucidate the extent to which each variable aligns with the principal components. The analysis concludes with a correlation pie chart, which highlights the interrelationship between the original variables and the principal components.
+
+### **Findings**:
+
+The PCA visualisations highlight that the two original dimensions encapsulate the majority of the variance in the dataset, with Dim1 accounting for 49.1% and Dim2 capturing 26.7%. The scatterplots elucidate the dispersion of the data points, hinting at intrinsic variability and potential clustering. In particular, the scatter plot indicates nested relationships between 'Price' and 'Reviews' and between 'Effectiveness' and 'Satisfaction'. The primary variables influencing Dim1 are 'Effectiveness' and 'Satisfaction', while for Dim2, the dominant influencers are 'Reviews' and 'Price'. These visual aids allow us to look more closely at the interconnections between the variables and to highlight the importance of the dimensions.
+
+# **7. Random Forests (URF)**
+
+```{r}
+registerDoParallel(cores=4) # Adjust based on your machine's cores
+
+# Train Initial Model using consistent data
+set.seed(42)
+model <- randomForest(Effective ~ ., data=drug_data_clean, ntree=1000, proximity=TRUE)
+
+# Visualize OOB error rate across different tree numbers
+oob.error.data <- data.frame(Trees=1:1000, OOB=model$mse)
+ggplot(oob.error.data, aes(Trees, OOB)) +
+  geom_line(color="blue") +
+  labs(title="OOB Error Rate Across Trees", x="Number of Trees", y="OOB Error Rate") +
+  theme_minimal()
+
+# Identify optimal tree number
+optimal_trees <- which.min(oob.error.data$OOB)
+cat("Optimal Trees: ", optimal_trees, " Min OOB Error: ", min(oob.error.data$OOB), "\n")
+
+# Determine best mtry (variables at each split) - using parallel processing
+mtry_range <- 1:(length(names(drug_data_clean)) - 1)  # Excluding the dependent variable
+oob.values <- foreach(m=mtry_range, .combine=c) %dopar% {
+  temp.model <- randomForest(Effective ~ ., data=drug_data_clean, mtry=m, 
+                             ntree=optimal_trees)
+  return(temp.model$mse[optimal_trees])
+}
+
+# Identify optimal mtry value
+optimal.mtry <- which.min(oob.values)
+cat("Optimal mtry: ", optimal.mtry, " Min OOB Error for mtry: ", min(oob.values), "\n")
+
+# Visualize OOB error across different mtry values 
+ggplot(data.frame(mtry=mtry_range, OOB_Error=oob.values), aes(mtry, OOB_Error)) +
+  geom_line(color="darkgreen") + geom_point() +
+  labs(title="OOB Error Across mtry Values", x="mtry", y="OOB Error") +
+  theme_minimal()
+
+# Generate MDS plot
+distance.matrix <- as.dist(1 - model$proximity)
+mds.stuff <- cmdscale(distance.matrix, eig=TRUE, x.ret=TRUE)
+mds.data <- data.frame(X=mds.stuff$points[,1], 
+                       Y=mds.stuff$points[,2], Effective=drug_data_clean$Effective)
+
+# Visualize MDS values
+ggplot(mds.data, aes(x=X, y=Y)) + 
+  geom_point(alpha=0.7)+
+  theme_minimal() +
+  labs(title="MDS plot based on RF Proximities")
+
+# Identify and display important variables
+var_importance <- importance(model)
+ordered_importance <- var_importance[order(-var_importance[, 1]), ]
+cat("Variable Importance:\n")
+print(ordered_importance)
+```
+
+### **Methodology**:
+
+Within the framework of random forests, an in-depth analysis of the "Effective" variable was undertaken using the drug dataset. The procedure began with the initiation of a random forest model trained on the dataset, comprising 1,000 trees. Next, the proximity matrix derived from this training was used for multidimensional scaling (MDS) evaluation. The out-of-bag (OOB) error rates for various numbers of trees were plotted to determine the optimal number of trees. Iterative learning of the model, focusing on different mtry values, facilitated discernment of the optimal number of predictor variables (mtry) for each division. The next step was to create a two-dimensional MDS visualisation using the proximity matrix of the main model. This visualisation spatially delineates the data on the basis of the random forest proximities. Finally, the variables were ranked according to their importance in predicting the 'effective' outcome. In addition, an assessment of the correlation between 'ease of use' and 'effectiveness' was carried out.
+
+### **Findings:**
+
+The URF analysis shed light on the fact that the optimal tree count is 956, corresponding to an OOB error rate of 0.05212494. The optimal mtry was determined to be 9, and it rendered an OOB error rate of 0.01361613. In the MDS plot's visual analysis, 'Satisfaction' emerged as the paramount predictor, bearing an importance score of 241.980807.
+
+# **8. Clustering (K-means)**
+
+```{r}
+# Set global parameters for reproducibility
+set.seed(42)
+
+# Extract MDS coordinates
+mds_numeric <- mds.data[, 1:2]
+
+# ------- Determine Optimal Clusters using Elbow Method -------
+wss <- numeric(10)  
+for (k in 1:10) {
+  kmeans.model <- kmeans(mds_numeric, centers=k)
+  wss[k] <- kmeans.model$tot.withinss
+}
+
+elbow_plot <- ggplot(data.frame(k=1:10, wss=wss), aes(x=k, y=wss)) +
+  geom_line(color="purple") + geom_point() +
+  labs(title="Elbow method for optimal k", x="Number of clusters", 
+       y="Total within-cluster sum of squares") +
+  theme_minimal()
+
+print(elbow_plot)
+
+# ------- K-means Clustering using Optimal Number of Clusters -------
+chosen_k <- 3  # Updated based on visualization
+kmeans_model_final <- kmeans(mds_numeric, centers=chosen_k)
+
+cluster_plot <- autoplot(kmeans_model_final, mds_numeric, frame=TRUE)
+print(cluster_plot)
+
+# Displaying cluster centers for interpretation
+print(kmeans_model_final$centers)
+
+# ------- Analysis of Clusters -------
+# Attach cluster assignments to the original MDS data
+clustering_results <- cbind(mds.data, cluster = kmeans_model_final$cluster)
+
+# Summarize the MDS data by cluster
+cluster_summary <- by(clustering_results, clustering_results$cluster, summary)
+print(cluster_summary)
+
+# Attach cluster assignments to the original drug data
+data_with_clusters <- cbind(drug_data_clean, cluster = kmeans_model_final$cluster)
+
+# Analyze the EaseOfUse variable by cluster
+ease_of_use_by_cluster <- aggregate(EaseOfUse ~ cluster, data=data_with_clusters, 
+                                    FUN=mean)
+
+# Plotting average EaseOfUse by cluster
+ease_of_use_plot <- ggplot(ease_of_use_by_cluster, 
+                           aes(x=as.factor(cluster), y=EaseOfUse)) +
+  geom_bar(stat="identity", fill="skyblue") +
+  labs(title="Average EaseOfUse by Cluster", x="Cluster", y="Average EaseOfUse") +
+  theme_minimal()
+
+print(ease_of_use_plot)
+```
+
+### **Methodology:**
+
+k-means clustering analysis is conducted on multidimensional scaling (MDS) coordinates derived from a drug dataset. A seed is set for reproducibility and the two main MDS dimensions are extracted. The elbow method is employed to determine the optimal number of clusters by plotting the total within-cluster sum of squares against a range of potential cluster numbers. Once the optimal cluster count is identified, k-means clustering is performed. Following this, cluster centers are displayed, cluster assignments are attached to the original MDS data, and an analysis is carried out on the 'EaseOfUse' variable by cluster. The results are visualized in plots, showcasing both the elbow method results and the average 'EaseOfUse' by cluster.
+
+### **Findings:**
+
+The elbow method graph highlighted three as the optimal number of clusters, as evidenced by the sharp bend in the plot. This choice was further corroborated by the scatter plot showcasing the clusters based on the first two principal components, PC1 and PC2. Notably, PC1 accounted for a significant 72.92% of the variance, whereas PC2 explained 27.08%, reinforcing the importance of these components in data differentiation.
+
+The scatter plot distinctly separated the three clusters, with each color-coded to provide clarity. The spatial separation observed between these clusters reinforces the efficiency of the k-means clustering technique in distinguishing the data groups.
+
+Upon closer examination of the PCA scatter plot, Cluster 1 predominantly situates on the upper-left quadrant, capturing data points with high PC2 values. Cluster 2 spans across the lower-left section, characterized by data points with negative values on the X-axis (PC1). Cluster 3 is elongated, moving from the left to the right on the lower quadrant, with more centered values in both PC1 and PC2.
+
+Furthermore, the "Average EaseOfUse by Cluster" bar chart adds another dimension to our understanding. It is evident that Cluster 2 has the highest average score in terms of ease of use, while Cluster 1 trails. Cluster 3 settles in between, suggesting varying levels of user-friendliness or satisfaction across the three clusters.
+
+The precise centroids for the clusters, as derived from the MDS space, were identified as follows:
+
+-   **Cluster 1**: (0.06301, 0.3760)
+
+-   **Cluster 2**: (-0.4920, 0.006434)
+
+-   **Cluster 3**: (0.04666, -0.02401)
+
+In summary, the combination of the elbow method, PCA scatter plot, and the ease of use chart offers comprehensive insights into the data's clustering behavior, revealing distinct groupings that could correspond to different drug groups or user perceptions.
+
+# **9. Predictive Modelling**
+
+```{r}
+# Define a function to split the dataset into train, validation, and test subsets.
+split_data <- function(data, response_col, feature_col, initial_p = 0.7, 
+                       secondary_p = 0.5) {
+  set.seed(42)
+  
+  # Initial split to carve out training data
+  initial_split <- createDataPartition(data[[response_col]], p = initial_p, list = FALSE)
+  
+  train_features <- data[initial_split, feature_col]
+  train_response <- data[initial_split, response_col]
+  
+  secondary_data <- data[-initial_split, ]
+  validation_split <- createDataPartition(secondary_data[[response_col]], 
+                                          p = secondary_p, list = FALSE)
+  
+  validation_features <- secondary_data[validation_split, feature_col]
+  validation_response <- secondary_data[validation_split, response_col]
+  
+  test_features <- secondary_data[-validation_split, feature_col]
+  test_response <- secondary_data[-validation_split, response_col]
+  
+  # Return all splits and their respective indices in a list format
+  list(
+    train_data = data.frame(Feature = train_features, Response = train_response),
+    validation_data = data.frame(Feature = validation_features, 
+                                 Response = validation_response),
+    test_data = data.frame(Feature = test_features, Response = test_response),
+    train_indices = initial_split,
+    validation_indices = validation_split
+  )
+}
+
+# Use the split function to create training, validation, and test datasets
+data_splits <- split_data(drug_data_clean, "Effective", "EaseOfUse")
+
+# Set up training control with 10-fold cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+
+# Train the model using cross-validation on the training data
+cv_model <- train(Response ~ Feature, data = data_splits$train_data, method = "lm",
+                 trControl = train_control)
+
+# Display cross-validation results
+cat("\n10-Fold Cross-Validation Results:\n")
+print(cv_model$results)
+
+# Calculate the average RMSE over the 10 folds
+avg_cv_rmse <- mean(cv_model$resample$RMSE)
+cat("\nAverage RMSE from 10-fold CV:", avg_cv_rmse, "\n")
+
+# Train a linear model on the training data
+model_full <- lm(Response ~ Feature, data = data_splits$train_data)
+
+# Display the model details
+cat("Linear Regression Coefficients:\n")
+print(coef(model_full))
+cat("\nModel Summary:\n")
+print(summary(model_full))
+
+# Evaluate the model on the validation data
+predictions_validation <- predict(model_full, newdata = data_splits$validation_data)
+validation_rmse <- sqrt(mean((data_splits$validation_data$Response - predictions_validation)^2))
+cat("\nValidation RMSE:", validation_rmse, "\n")
+
+# Plot of Actual vs. Predicted values for Validation dataset
+ggplot(data.frame(Actual = data_splits$validation_data$Response, 
+                  Predicted = predictions_validation), aes(x = Actual, y = Predicted)) +
+  geom_point(aes(color = abs(Actual - Predicted)), size = 3) +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  ggtitle("Validation Data: Actual vs. Predicted Values") +
+  xlab("Actual Values") +
+  ylab("Predicted Values") +
+  scale_color_gradient(name = "Error", low = "blue", high = "red") +
+  theme_minimal()
+
+# Evaluate the model on the test data
+predictions_test <- predict(model_full, newdata = data_splits$test_data)
+test_rmse <- sqrt(mean((data_splits$test_data$Response - predictions_test)^2))
+cat("\nTest RMSE:", test_rmse, "\n")
+
+# Plot of Actual vs. Predicted values for Test dataset
+ggplot(data.frame(Actual = data_splits$test_data$Response, 
+                  Predicted = predictions_test), aes(x = Actual, y = Predicted)) +
+  geom_point(aes(color = abs(Actual - Predicted)), size = 3) +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  ggtitle("Test Data: Actual vs. Predicted Values") +
+  xlab("Actual Values") +
+  ylab("Predicted Values") +
+  scale_color_gradient(name = "Error", low = "blue", high = "red") +
+  theme_minimal()
+```
+
+### **Methodology:**
+
+The dataset was divided into training, validation, and test subsets using the **`split_data`** function. Specifically, 70% was allocated for training, and the remaining 30% was equally divided between validation and testing.
+
+10-fold cross-validation was integrated into model training to enhance robustness. This method, specified by the **`trainControl`** function, trained the linear regression model and assessed its performance across 10 diverse train-validation subsets.
+
+After cross-validation, the linear regression model was trained using the **`lm`** function. The model summary revealed essential coefficients indicating the predictors' influence on the response.
+
+The model was then evaluated in two phases: validation and testing. Predictions for both sets were generated and compared with actual values, resulting in two RMSE metrics. These metrics gauge the model's prediction accuracy.
+
+Lastly, scatter plots for validation and test datasets were crafted, visualizing actual versus predicted values and emphasizing prediction errors. This offered a comprehensive representation of the model's strengths and areas for improvement.
+
+### **Findings:**
+
+The linear regression model predicts a response based on a single feature. From 10-fold cross-validation, the average prediction error is approximately 0.764 units. The model suggests that for every unit increase in the feature, the response increases by roughly 0.672 units. Both the intercept and the feature's coefficient are statistically significant.
+
+Residual analysis shows the model's predictions are relatively unbiased with the median residual close to zero. The R-squared value of 0.3917 indicates that about 39.17% of the response's variation is explained by the model, demonstrating a moderate linear relationship.
+
+On a separate validation dataset, the model's average prediction error is 0.643 units, slightly better than the cross-validation error. However, on the test dataset, the error is 0.751 units, indicating consistent performance across different datasets. This consistency suggests the model generalizes well to new data based on the selected feature.
+
+# **10. Research on active compounds**
+
+### **Observations:**
+
+-   There are several antibiotics on this list (Meropenem, Cefepime, Ceftriaxone, Ofloxacin, Ceftazidime, Levofloxacin).
+
+-   There are two mentions of Hydrocortisone Acetate, a corticosteroid.
+
+-   Several drugs are used for pain and inflammation (Naproxen, Trolamine Salicylate, Hydrocortisone Acetate).
+
+-   A couple of the drugs are antacids (Aluminum-Magnesium Hydroxide, Aluminum-Magnesium-Alginate).
+
+### **Potential Influences on Relationship:**
+
+1.  **Antibiotics**: The various antibiotics could have different effectiveness profiles depending on the type of bacteria they're targeting. Some might be broad-spectrum, while others are more specific. Resistance patterns, patient adherence, and other factors can influence their perceived effectiveness.
+
+2.  **Corticosteroids & NSAIDs**: These drugs target inflammation and pain. Their effectiveness can be highly subjective and depend on the specific conditions they're treating.
+
+3.  **Antacids**: The effectiveness of antacids can be influenced by factors like diet, other medications, and the exact nature of the stomach issue being treated.
+
+# **10.** PCA-Based Classification Methods for Drug Effectiveness (not conclusive)
+
+### 1. Pre-processing
+
+```{r}
+# Extract numeric columns
+drug_data_clean_numeric <- drug_data_clean[, numeric_vars]
+
+# Splitting dataset
+set.seed(123)
+split = sample.split(drug_data_clean_numeric$Effective, SplitRatio = 0.7)
+training_set = subset(drug_data_clean_numeric, split == TRUE)
+test_set = subset(drug_data_clean_numeric, split == FALSE)
+
+# Feature scaling
+effective_col = 2
+training_set[-effective_col] = scale(training_set[-effective_col])
+test_set[-effective_col] = scale(test_set[-effective_col])
+```
+
+### 2. SVM
+
+```{r}
+# Applying Kernel PCA
+kpca = kpca(~., data = training_set[-effective_col], kernel = 'rbfdot', features = 2)
+training_set_pca_kern = as.data.frame(predict(kpca, training_set))
+training_set_pca_kern$Effective = as.factor(training_set$Effective)
+test_set_pca_kern = as.data.frame(predict(kpca, test_set))
+test_set_pca_kern$Effective = as.factor(test_set$Effective)
+
+# Train SVM with Kernel PCA
+svm_model_kern <- svm(Effective ~., 
+                      data = training_set_pca_kern, 
+                      type = 'C-classification', 
+                      kernel = 'linear')
+
+# Ensure factor levels consistency
+levels(test_set_pca_kern$Effective) <- levels(training_set_pca_kern$Effective)
+
+# Predict with SVM on Kernel PCA test set
+predicted_labels_kern_svm <- predict(svm_model_kern, test_set_pca_kern[, 1:2])
+predicted_labels_kern_svm <- factor(predicted_labels_kern_svm, 
+                                    levels = levels(training_set_pca_kern$Effective))
+accuracy_kern_svm = sum(test_set_pca_kern$Effective == predicted_labels_kern_svm) / 
+  length(predicted_labels_kern_svm)
+cat("Accuracy using Kernel PCA with SVM:", accuracy_kern_svm, "\n")
+
+# Applying simple PCA
+pca = prcomp(training_set[-effective_col], center = TRUE, scale. = TRUE)
+training_set_pca_simple = as.data.frame(pca$x[,1:2])
+training_set_pca_simple$Effective = as.factor(training_set$Effective)
+test_set_pca_simple = as.data.frame(predict(pca, test_set[-effective_col]))
+test_set_pca_simple$Effective = as.factor(test_set$Effective)
+
+# Train SVM on simple PCA data
+svm_model_simple <- svm(Effective ~., 
+                        data = training_set_pca_simple, 
+                        type = 'C-classification', 
+                        kernel = 'linear')
+
+# Ensure factor levels consistency
+levels(test_set_pca_simple$Effective) <- levels(training_set_pca_simple$Effective)
+
+# Predict with SVM on Simple PCA test set and get accuracy
+predicted_labels_simple_svm <- predict(svm_model_simple, test_set_pca_simple[, 1:2])
+accuracy_simple_svm = sum(test_set_pca_simple$Effective == predicted_labels_simple_svm) /
+  length(predicted_labels_simple_svm)
+cat("Accuracy using Simple PCA with SVM:", accuracy_simple_svm, "\n")
+
+# Comparing both methods
+cat("Difference in accuracy between Kernel PCA and simple PCA with SVM:",
+    accuracy_kern_svm - accuracy_simple_svm, "\n")
+```
+
+### 3. XGBoost
+
+```{r}
+# Applying Kernel PCA
+kpca = kpca(~., data = training_set[-effective_col], kernel = 'rbfdot', features = 2)
+training_set_pca_kern = as.data.frame(predict(kpca, training_set))
+training_set_pca_kern$Effective = training_set$Effective
+test_set_pca_kern = as.data.frame(predict(kpca, test_set))
+test_set_pca_kern$Effective = test_set$Effective
+
+# Train XGBoost with Kernel PCA
+num_class_value <- length(unique(training_set_pca_kern$Effective))
+classifier_kern = xgboost(data = as.matrix(training_set_pca_kern[, 1:2]), 
+                          # Using the first two columns
+                          label = as.numeric(training_set_pca_kern$Effective) - 1, 
+                          nrounds = 100, 
+                          objective = "multi:softmax", 
+                          num_class = num_class_value,
+                          verbose=0)
+
+# Predict with XGBoost on Kernel PCA test set and get accuracy
+predicted_labels_kern_XGBoost <- predict(classifier_kern, 
+                                         as.matrix(test_set_pca_kern[, 1:2]))
+accuracy_kern_XGBoost = sum(as.numeric(
+  test_set_pca_kern$Effective) - 1 == predicted_labels_kern_XGBoost) / 
+  length(predicted_labels_kern_XGBoost)
+cat("Accuracy using Kernel PCA with XGBoost:", accuracy_kern_XGBoost, "\n")
+
+# Applying simple PCA
+pca = prcomp(training_set[-effective_col], center = TRUE, scale. = TRUE)
+training_set_pca_simple = as.data.frame(pca$x[,1:2])
+training_set_pca_simple$Effective = training_set$Effective
+test_set_pca_simple = as.data.frame(predict(pca, newdata = test_set[-effective_col]))
+test_set_pca_simple$Effective = test_set$Effective
+
+# Train XGBoost on simple PCA data
+classifier_simple = xgboost(data = as.matrix(training_set_pca_simple[, c("PC1", "PC2")]), 
+                            label = as.numeric(training_set_pca_simple$Effective) - 1, 
+                            nrounds = 100, 
+                            objective = "multi:softmax", 
+                            num_class = num_class_value,
+                            verbose=0)
+
+# Predict with XGBoost on Simple PCA test set and get accuracy
+predicted_labels_pca_XGBoost <- predict(classifier_simple, 
+                                        as.matrix(test_set_pca_simple[, c("PC1", "PC2")]))
+accuracy_pca_XGBoost = sum(as.numeric
+                           (test_set_pca_simple$Effective) - 1 == predicted_labels_pca_XGBoost) / 
+  length(predicted_labels_pca_XGBoost)
+
+cat("Accuracy using Simple PCA with XGBoost:", accuracy_pca_XGBoost, "\n")
+
+# Comparing both methods
+cat("Difference in accuracy between Kernel PCA and simple PCA:", 
+    accuracy_kern_XGBoost - accuracy_pca_XGBoost, "\n")
+```
+
+### **Methodology:**
+
+\
+The section titled "PCA-Based Classification Methods for Drug Effectiveness" primarily explores the effectiveness of drug treatments by using principal component analysis (PCA) as a dimensionality reduction technique. In the preprocessing stage, numerical variables from the dataset are extracted, which are subsequently divided into training and test sets. These datasets undergo feature scaling to normalize the data. With the preprocessed data, two classification methods are employed: Support Vector Machine (SVM) and XGBoost.
+
+For each classification method, both Kernel PCA and standard PCA are applied for dimensionality reduction. In the SVM method, the training data is subjected to Kernel PCA and a linear kernel SVM is trained, followed by predictions on the test set to assess accuracy. Similarly, a standard PCA-based SVM model is trained and evaluated. The accuracies of both methods are then compared to identify differences.
+
+For the XGBoost method, the procedure is mirrored: Kernel PCA is applied to the training data, followed by the training of an XGBoost model, and the subsequent assessment of prediction accuracy on the test set. Again, a standard PCA-based XGBoost model is trained and its accuracy is compared with the Kernel PCA method.
+
+### **Findings:**
+
+In the application of PCA-based classification methods for drug effectiveness, both Kernel PCA and simple PCA yield the same accuracy rate of approximately 4.96% when using SVM as the classification method. However, when XGBoost is used as the classifier, the accuracy rates increase significantly. Specifically, the Kernel PCA with XGBoost method achieves an accuracy rate of about 23.97%, while the simple PCA with XGBoost method reaches an accuracy rate of about 21.49%. The difference in accuracy between the two PCA methods when using XGBoost is approximately 2.48%.
+
+### **Reflection:**
+
+It's intriguing that both the Kernel PCA and simple PCA yield the exact same accuracy rate when used with SVM. This could suggest that the transformation done by Kernel PCA does not introduce any meaningful differentiation in the dataset as compared to simple PCA, in the context of SVM. Furthermore, the exceedingly low accuracy rate, nearly 5%, implies that the SVM model might not be capturing the underlying patterns in the data effectively. Even after trying a 'polynomial' kernel in the SVM, the results remained unchanged. This could indicate that the issue is not only about the linearity or non-linearity of the data but could also be related to other factors.
+
+XGBoost demonstrates significantly higher accuracy than SVM, regardless of the PCA method used. This suggests that XGBoost, being an ensemble gradient boosting algorithm, is better equipped to capture complex relationships in the dataset as compared to SVM. The difference in accuracy rates between Kernel PCA and simple PCA when using XGBoost, although small, might indicate subtle differences in how each PCA method transforms the dataset, which XGBoost can exploit.
